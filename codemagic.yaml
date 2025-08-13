@@ -1,3 +1,4 @@
+
 workflows:
   android_release:
     name: Android Release (AAB)
@@ -459,8 +460,8 @@ workflows:
                                 context: context,
                                 builder: (_) => SafeArea(
                                   child: Column(mainAxisSize: MainAxisSize.min, children: [
-                                    ListTile(leading: const Icon(Icons.ios_share), title: const Text('Partager'), onTap: () { Navigator.pop(context); shareFile(f); }),
-                                    ListTile(leading: const Icon(Icons.delete_outline), title: const Text('Supprimer'), onTap: () { Navigator.pop(context); deleteFile(f); }),
+                                    ListTile(leading: const Icon(Icons.ios_share), title: const Text('Partager'), onTap: () { Navigator.pop(context); Share.shareXFiles([XFile(f.path)], text: 'Mon mandala'); }),
+                                    ListTile(leading: const Icon(Icons.delete_outline), title: const Text('Supprimer'), onTap: () { Navigator.pop(context); f.delete(); refresh(); }),
                                   ]),
                                 ),
                               );
@@ -503,10 +504,6 @@ workflows:
           if [ ! -d "ios" ]; then
             flutter create .
           fi
-      - name: Write same project files for iOS
-        script: |
-          # réutilise les fichiers déjà écrits par le workflow Android si besoin
-          [ -f pubspec.yaml ] || echo "pubspec missing" && exit 0
       - name: Flutter pub get
         script: flutter pub get
       - name: Build IPA (no codesign)
