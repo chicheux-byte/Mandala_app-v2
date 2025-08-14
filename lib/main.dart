@@ -1,5 +1,6 @@
-// Fullscreen + mandala painter + tools, mobile friendly
-import 'dart:async';                 // <-- pour Completer()
+// Mandala painter full app (mobile fullscreen, tools, UnimplementedError fix)
+
+import 'dart:async';
 import 'dart:math';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
@@ -10,9 +11,8 @@ import 'package:flutter/services.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Plein écran immersif (les barres réapparaissent au swipe puis se cachent)
+  // Plein écran immersif pour téléphone
   await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
-  // Thème overlays clair pour fond clair
   SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
     statusBarColor: Colors.transparent,
     statusBarIconBrightness: Brightness.dark,
@@ -40,10 +40,7 @@ class App extends StatelessWidget {
   }
 }
 
-/// Outils
 enum Tool { bucket, brush, eraser, pipette, pan }
-
-/// Styles de génération
 enum StylePreset { simple, detailed, ultra }
 
 class Home extends StatefulWidget {
@@ -53,16 +50,16 @@ class Home extends StatefulWidget {
 }
 
 class _HomeState extends State<Home> {
-  // Canvas offscreen
+  // Surface offscreen (carrée)
   static const int W = 1024, H = 1024;
 
-  // Images/canaux
+  // Images
   ui.Image? _lineArtImg;      // traits transparents (affichage)
   Uint8List? _maskRgba;       // traits sur fond blanc (barrières)
   ui.Image? _colorImg;        // couche couleur
   Uint8List _colorRgba = Uint8List(W * H * 4);
 
-  // Paramètres mandala (avec valeurs sûres)
+  // Paramètres mandala
   int seed = DateTime.now().millisecondsSinceEpoch;
   int symmetry = 14;
   int rings = 6;
@@ -79,7 +76,6 @@ class _HomeState extends State<Home> {
   // Zoom/pan
   final TransformationController _ctrl = TransformationController();
 
-  // State
   bool _busy = false;
   Offset? _lastDrag;
 
@@ -90,7 +86,22 @@ class _HomeState extends State<Home> {
     _regenerate();
   }
 
-  // ----------------- Génération (sécurisée) -----------------
+  // -------- RGBA → Image (compatible Android) ----------
+  Future<ui.Image> _rgbaToImage(Uint8List rgba, int w, int h) async {
+    // Fix UnimplementedError: on utilise ImmutableBuffer + ImageDescriptor.raw + codec
+    final buffer = await ui.ImmutableBuffer.fromUint8List(rgba);
+    final descriptor = ui.ImageDescriptor.raw(
+      buffer,
+      width: w,
+      height: h,
+      pixelFormat: ui.PixelFormat.rgba8888,
+    );
+    final codec = await descriptor.instantiateCodec();
+    final frame = await codec.getNextFrame();
+    return frame.image;
+  }
+
+  // ------------------- Génération ----------------------
   Future<void> _regenerate() async {
     setState(() => _busy = true);
     try {
@@ -109,7 +120,7 @@ class _HomeState extends State<Home> {
       painter.paint(c1, Size(W.toDouble(), H.toDouble()));
       _lineArtImg = await r1.endRecording().toImage(W, H);
 
-      // 2) line-art sur fond blanc (barrières pour seau)
+      // 2) line-art sur fond blanc (barrières pour le seau)
       final r2 = ui.PictureRecorder();
       final c2 = Canvas(r2, Rect.fromLTWH(0, 0, W.toDouble(), H.toDouble()));
       final painterMask = LineArtMandalaPainter(
@@ -126,7 +137,7 @@ class _HomeState extends State<Home> {
       final bd = await mask.toByteData(format: ui.ImageByteFormat.rawRgba);
       _maskRgba = bd!.buffer.asUint8List();
 
-      // 3) couche couleur vide
+      // 3) couche couleur (vide) + image affichable
       _colorRgba = Uint8List(W * H * 4);
       _colorImg = await _rgbaToImage(_colorRgba, W, H);
     } catch (e, st) {
@@ -141,13 +152,7 @@ class _HomeState extends State<Home> {
     }
   }
 
-  Future<ui.Image> _rgbaToImage(Uint8List rgba, int w, int h) async {
-    final c = Completer<ui.Image>();
-    ui.decodeImageFromPixels(rgba, w, h, ui.PixelFormat.rgba8888, c.complete);
-    return c.future;
-  }
-
-  // ----------------- Outils -----------------
+  // -------------- Outils dessin & seau -----------------
   Offset _toImageSpace(Offset p, Size box) {
     final s = min(box.width, box.height);
     final scale = W / s;
@@ -194,7 +199,7 @@ class _HomeState extends State<Home> {
       final r = _maskRgba![pxIndex + 0];
       final g = _maskRgba![pxIndex + 1];
       final b = _maskRgba![pxIndex + 2];
-      return (r + g + b) < 150; // noir/gris = barrière
+      return (r + g + b) < 150; // pixels sombres = traits = barrière
     }
 
     final start = (y0 * W + x0) * 4;
@@ -267,7 +272,7 @@ class _HomeState extends State<Home> {
     });
   }
 
-  // ----------------- Styles -----------------
+  // ---------------- Styles -----------------
   void _applyPreset(StylePreset preset, {bool regenerate = true}) {
     setState(() {
       style = preset;
@@ -298,19 +303,17 @@ class _HomeState extends State<Home> {
     if (regenerate) _regenerate();
   }
 
-  // ----------------- UI -----------------
+  // ---------------- UI -----------------
   @override
   Widget build(BuildContext context) {
     final canDraw = _lineArtImg != null && _colorImg != null;
-    final padding = MediaQuery.of(context).viewPadding; // SafeArea dynamique
+    final padding = MediaQuery.of(context).viewPadding;
 
     return Scaffold(
       extendBody: true,
-      extendBodyBehindAppBar: false,
       appBar: AppBar(
         title: const Text('Mandala'),
         elevation: 0,
-        toolbarHeight: 56,
         actions: [
           _presetChip('Simple', StylePreset.simple),
           _presetChip('Détaillé', StylePreset.detailed),
@@ -326,10 +329,9 @@ class _HomeState extends State<Home> {
         ],
       ),
       body: SafeArea(
-        bottom: false, // on gère nous-mêmes l’espace bas
+        bottom: false,
         child: Column(
           children: [
-            // Zone de dessin
             Expanded(
               child: Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 8),
@@ -387,8 +389,8 @@ class _HomeState extends State<Home> {
                                   child: Stack(
                                     fit: StackFit.expand,
                                     children: [
-                                      RawImage(image: _colorImg),   // couleurs
-                                      RawImage(image: _lineArtImg), // traits
+                                      RawImage(image: _colorImg),
+                                      RawImage(image: _lineArtImg),
                                     ],
                                   ),
                                 ),
@@ -399,12 +401,8 @@ class _HomeState extends State<Home> {
                 ),
               ),
             ),
-
-            // Outils / palette
             const SizedBox(height: 8),
             _toolbar(context),
-
-            // Espace pour ne pas chevaucher la barre système (gestes Android)
             SizedBox(height: max(8.0, padding.bottom)),
           ],
         ),
@@ -473,8 +471,7 @@ class _HomeState extends State<Home> {
       Colors.white, Colors.black,
     ];
     return Wrap(
-      spacing: 6,
-      runSpacing: 6,
+      spacing: 6, runSpacing: 6,
       children: [
         for (final c in colors)
           GestureDetector(
@@ -542,7 +539,6 @@ class LineArtMandalaPainter {
   final _black = const Color(0xFF000000);
 
   void paint(Canvas canvas, Size size) {
-    // Fond blanc si demandé
     if (!transparentBackground) {
       canvas.drawRect(
         Rect.fromLTWH(0, 0, size.width, size.height),
@@ -568,7 +564,7 @@ class LineArtMandalaPainter {
       ..strokeJoin = StrokeJoin.round
       ..isAntiAlias = true;
 
-    // Toujours au moins un cercle extérieur visible
+    // Toujours au moins un cercle visible
     canvas.drawCircle(center, R, pen(_stroke * 0.85));
 
     final ringR = List<double>.generate(_rings + 1, (i) => R * i / _rings);
@@ -633,7 +629,7 @@ class LineArtMandalaPainter {
             base.close();
             break;
 
-          case 1: // écailles concentriques
+          case 1: // écailles
             final steps = 3 + rnd.nextInt(3);
             for (int t = 0; t < steps; t++) {
               final rr = ui.lerpDouble(ri, ro, t / (steps - 1))!;
@@ -671,20 +667,20 @@ class LineArtMandalaPainter {
         }
       }
 
-      void repeat(Path basePath) {
+      void repeat(Path p) {
         for (int k = 0; k < _sym; k++) {
           final ang = k * wedge;
           final m = Matrix4.identity()
             ..translate(center.dx, center.dy)
             ..rotateZ(ang)
             ..translate(-center.dx, -center.dy);
-          canvas.drawPath(basePath.transform(m.storage), pen(_stroke));
+          canvas.drawPath(p.transform(m.storage), pen(_stroke));
           final m2 = Matrix4.identity()
             ..translate(center.dx, center.dy)
             ..rotateZ(ang)
             ..scale(1, -1, 1)
             ..translate(-center.dx, -center.dy);
-          canvas.drawPath(basePath.transform(m2.storage), pen(_stroke));
+          canvas.drawPath(p.transform(m2.storage), pen(_stroke));
         }
       }
 
