@@ -1,21 +1,35 @@
 workflows:
-  android_release:
-    name: Build Android Release
-    max_build_duration: 60
+  android_debug:
+    name: Android Debug APK
     environment:
       flutter: stable
-      xcode: latest
     scripts:
-      - name: Get dependencies
-        script: flutter pub get
-      - name: Build APK
-        script: flutter build apk --release
-      - name: Build AAB
-        script: flutter build appbundle --release
+      - name: Bootstrap (create android/ if missing)
+        script: |
+          if [ ! -d "android" ]; then
+            flutter create .
+          fi
+          flutter pub get
+      - name: Build debug APK
+        script: flutter build apk --debug
     artifacts:
+      - build/app/outputs/flutter-apk/*.apk
+
+  android_release:
+    name: Android Release (APK + AAB)
+    environment:
+      flutter: stable
+    scripts:
+      - name: Bootstrap (create android/ if missing)
+        script: |
+          if [ ! -d "android" ]; then
+            flutter create .
+          fi
+          flutter pub get
+      - name: Build release AAB
+        script: flutter build appbundle --release
+      - name: Build release APK
+        script: flutter build apk --release
+    artifacts:
+      - build/app/outputs/bundle/release/*.aab
       - build/app/outputs/flutter-apk/app-release.apk
-      - build/app/outputs/bundle/release/app-release.aab
-    publishing:
-      email:
-        recipients:
-          - your-email@example.com
