@@ -1,13 +1,8 @@
-import 'dart:async';
-import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart';
-import 'package:path_provider/path_provider.dart';
-import 'package:share_plus/share_plus.dart';
 
 void main() => runApp(const App());
 
@@ -31,7 +26,7 @@ class App extends StatelessWidget {
 /// Outils disponibles
 enum Tool { bucket, brush, eraser, pipette, pan }
 
-/// Styles prédéfinis
+/// Styles de génération
 enum StylePreset { simple, detailed, ultra }
 
 class Home extends StatefulWidget {
@@ -41,33 +36,32 @@ class Home extends StatefulWidget {
 }
 
 class _HomeState extends State<Home> {
-  // ----- Paramètres de génération -----
-  int seed = DateTime.now().millisecondsSinceEpoch;
-  int symmetry = 12;
-  int rings = 6;
-  double stroke = 2.0;
-  double detail = 0.8;
-  bool doodles = true;
-
-  StylePreset style = StylePreset.detailed;
-
-  // ----- Rendu offscreen -----
+  // Canvas offscreen
   static const int W = 1024, H = 1024;
 
-  ui.Image? _lineArtImg;        // traits noirs TRANSPARENTS (affichage)
+  // Images de travail
+  ui.Image? _lineArtImg;        // traits noirs en TRANSPARENT
   Uint8List? _maskRgba;         // line-art sur fond blanc (pour barrières)
   ui.Image? _colorImg;          // couche couleur (dessous)
   Uint8List _colorRgba = Uint8List(W * H * 4);
 
-  bool _busy = false;
+  // Génération
+  int seed = DateTime.now().millisecondsSinceEpoch;
+  int symmetry = 14;
+  int rings = 6;
+  double stroke = 2.0;
+  double detail = 0.8;
+  bool doodles = true;
+  StylePreset style = StylePreset.detailed;
 
-  // ----- Outils -----
+  // Outils
   Tool tool = Tool.bucket;
   Color paintColor = const Color(0xFF57E1FF);
-  double brushSize = 20;
+  double brushSize = 22;
 
-  // zoom/pan
   final TransformationController _ctrl = TransformationController();
+  bool _busy = false;
+  Offset? _lastDrag;
 
   @override
   void initState() {
@@ -76,17 +70,14 @@ class _HomeState extends State<Home> {
     _regenerate();
   }
 
-  // ---------------- Génération du line-art ----------------
+  // ============== Génération ==============
 
   Future<void> _regenerate() async {
     setState(() => _busy = true);
 
-    // 1) Line-art TRANSPARENT (pour affichage)
-    final picture1 = ui.PictureRecorder();
-    final canvas1 = Canvas(
-      picture1,
-      Rect.fromLTWH(0, 0, W.toDouble(), H.toDouble()),
-    );
+    // 1) Line-art TRANSPARENT (affichage)
+    final rec1 = ui.PictureRecorder();
+    final canvas1 = Canvas(rec1, Rect.fromLTWH(0, 0, W.toDouble(), H.toDouble()));
     final painter = LineArtMandalaPainter(
       seed: seed,
       symmetry: symmetry,
@@ -96,15 +87,12 @@ class _HomeState extends State<Home> {
       addDoodles: doodles,
       transparentBackground: true,
     );
-    painter.paint(canvas1, const Size(W.toDouble(), H.toDouble()));
-    _lineArtImg = await picture1.endRecording().toImage(W, H);
+    painter.paint(canvas1, Size(W.toDouble(), H.toDouble())); // <-- pas const
+    _lineArtImg = await rec1.endRecording().toImage(W, H);
 
-    // 2) Line-art SUR FOND BLANC (pour flood-fill : détecter les traits)
-    final picture2 = ui.PictureRecorder();
-    final canvas2 = Canvas(
-      picture2,
-      Rect.fromLTWH(0, 0, W.toDouble(), H.toDouble()),
-    );
+    // 2) Line-art sur FOND BLANC (barrières pour flood-fill)
+    final rec2 = ui.PictureRecorder();
+    final canvas2 = Canvas(rec2, Rect.fromLTWH(0, 0, W.toDouble(), H.toDouble()));
     final painterMask = LineArtMandalaPainter(
       seed: seed,
       symmetry: symmetry,
@@ -112,15 +100,15 @@ class _HomeState extends State<Home> {
       stroke: stroke,
       density: detail,
       addDoodles: doodles,
-      transparentBackground: false, // fond blanc
+      transparentBackground: false, // fond blanc obligatoire
     );
-    painterMask.paint(canvas2, const Size(W.toDouble(), H.toDouble()));
-    final maskImage = await picture2.endRecording().toImage(W, H);
+    painterMask.paint(canvas2, Size(W.toDouble(), H.toDouble()));
+    final maskImage = await rec2.endRecording().toImage(W, H);
     final bd = await maskImage.toByteData(format: ui.ImageByteFormat.rawRgba);
     _maskRgba = bd!.buffer.asUint8List();
 
-    // 3) Réinitialiser la couche couleur
-    _colorRgba = Uint8List(W * H * 4); // tout transparent
+    // 3) Couche couleur = vide (transparent)
+    _colorRgba = Uint8List(W * H * 4);
     _colorImg = await _rgbaToImage(_colorRgba, W, H);
 
     setState(() => _busy = false);
@@ -132,63 +120,8 @@ class _HomeState extends State<Home> {
     return c.future;
   }
 
-  // ---------------- Export / Partage ----------------
+  // ============== Outils ==============
 
-  Future<void> _save() async {
-    if (_lineArtImg == null || _colorImg == null) return;
-    setState(() => _busy = true);
-
-    final rec = ui.PictureRecorder();
-    final c = Canvas(rec);
-    // fond blanc
-    c.drawRect(
-      Rect.fromLTWH(0, 0, W.toDouble(), H.toDouble()),
-      Paint()..color = Colors.white,
-    );
-    c.drawImage(_colorImg!, Offset.zero, Paint());
-    c.drawImage(_lineArtImg!, Offset.zero, Paint());
-    final img = await rec.endRecording().toImage(W, H);
-    final png = await img.toByteData(format: ui.ImageByteFormat.png);
-
-    final dir = await getApplicationDocumentsDirectory();
-    final out = Directory('${dir.path}/mandalas_coloriage');
-    if (!await out.exists()) await out.create(recursive: true);
-    final file = File('${out.path}/mandala_${DateTime.now().millisecondsSinceEpoch}.png');
-    await file.writeAsBytes(png!.buffer.asUint8List(), flush: true);
-
-    setState(() => _busy = false);
-    if (mounted) {
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('Enregistré : ${file.path.split('/').last}')));
-    }
-  }
-
-  Future<void> _share() async {
-    if (_lineArtImg == null || _colorImg == null) return;
-    setState(() => _busy = true);
-
-    final rec = ui.PictureRecorder();
-    final c = Canvas(rec);
-    c.drawRect(
-      Rect.fromLTWH(0, 0, W.toDouble(), H.toDouble()),
-      Paint()..color = Colors.white,
-    );
-    c.drawImage(_colorImg!, Offset.zero, Paint());
-    c.drawImage(_lineArtImg!, Offset.zero, Paint());
-    final img = await rec.endRecording().toImage(W, H);
-    final png = await img.toByteData(format: ui.ImageByteFormat.png);
-
-    final dir = await getTemporaryDirectory();
-    final file = File('${dir.path}/mandala_${DateTime.now().millisecondsSinceEpoch}.png');
-    await file.writeAsBytes(png!.buffer.asUint8List(), flush: true);
-
-    setState(() => _busy = false);
-    await Share.shareXFiles([XFile(file.path)], text: 'Mon mandala');
-  }
-
-  // ---------------- Outils : pinceau / gomme / pot / pipette ----------------
-
-  // convertit position locale (dans le carré) -> coord. image
   Offset _toImageSpace(Offset p, Size box) {
     final s = min(box.width, box.height);
     final scale = W / s;
@@ -197,7 +130,7 @@ class _HomeState extends State<Home> {
 
   Future<void> _refreshColorImage() async {
     _colorImg = await _rgbaToImage(_colorRgba, W, H);
-    setState(() {});
+    if (mounted) setState(() {});
   }
 
   void _paintAt(Offset pos, {required bool erase}) {
@@ -231,16 +164,15 @@ class _HomeState extends State<Home> {
     final x0 = pos.dx.clamp(0, W - 1).toInt();
     final y0 = pos.dy.clamp(0, H - 1).toInt();
 
-    bool isBarrier(int idx) {
-      // sur le mask : fond BLANC, traits NOIRS
-      final r = _maskRgba![idx + 0];
-      final g = _maskRgba![idx + 1];
-      final b = _maskRgba![idx + 2];
-      return (r + g + b) < 150; // noir/gris = barrière
+    bool isBarrierIndex(int pxIndex) {
+      final r = _maskRgba![pxIndex + 0];
+      final g = _maskRgba![pxIndex + 1];
+      final b = _maskRgba![pxIndex + 2];
+      return (r + g + b) < 150; // traits noirs/gris = barrière
     }
 
     final start = (y0 * W + x0) * 4;
-    if (isBarrier(start)) return;
+    if (isBarrierIndex(start)) return;
 
     final cr = paintColor.red,
         cg = paintColor.green,
@@ -258,7 +190,7 @@ class _HomeState extends State<Home> {
       visited[p] = 1;
 
       final li = p * 4;
-      if (isBarrier(li)) continue;
+      if (isBarrierIndex(li)) continue;
 
       _colorRgba[li + 0] = cr;
       _colorRgba[li + 1] = cg;
@@ -267,28 +199,28 @@ class _HomeState extends State<Home> {
 
       if (x > 0) {
         final pp = p - 1;
-        if (visited[pp] == 0 && !isBarrier(pp * 4)) {
+        if (visited[pp] == 0 && !isBarrierIndex(pp * 4)) {
           qx.add(x - 1);
           qy.add(y);
         }
       }
       if (x < W - 1) {
         final pp = p + 1;
-        if (visited[pp] == 0 && !isBarrier(pp * 4)) {
+        if (visited[pp] == 0 && !isBarrierIndex(pp * 4)) {
           qx.add(x + 1);
           qy.add(y);
         }
       }
       if (y > 0) {
         final pp = p - W;
-        if (visited[pp] == 0 && !isBarrier(pp * 4)) {
+        if (visited[pp] == 0 && !isBarrierIndex(pp * 4)) {
           qx.add(x);
           qy.add(y - 1);
         }
       }
       if (y < H - 1) {
         final pp = p + W;
-        if (visited[pp] == 0 && !isBarrier(pp * 4)) {
+        if (visited[pp] == 0 && !isBarrierIndex(pp * 4)) {
           qx.add(x);
           qy.add(y + 1);
         }
@@ -309,7 +241,7 @@ class _HomeState extends State<Home> {
     });
   }
 
-  // ---------------- Style presets ----------------
+  // ============== Styles ==============
 
   void _applyPreset(StylePreset preset, {bool regenerate = true}) {
     setState(() {
@@ -341,9 +273,7 @@ class _HomeState extends State<Home> {
     if (regenerate) _regenerate();
   }
 
-  // ---------------- UI ----------------
-
-  Offset? _lastDrag;
+  // ============== UI ==============
 
   @override
   Widget build(BuildContext context) {
@@ -356,17 +286,14 @@ class _HomeState extends State<Home> {
           _presetChip('Simple', StylePreset.simple),
           _presetChip('Détaillé', StylePreset.detailed),
           _presetChip('Ultra', StylePreset.ultra),
-          const SizedBox(width: 8),
           IconButton(
             icon: const Icon(Icons.casino),
-            tooltip: 'Nouveau',
+            tooltip: 'Nouveau tirage',
             onPressed: () {
               setState(() => seed = Random().nextInt(1 << 31));
               _regenerate();
             },
           ),
-          IconButton(icon: const Icon(Icons.download), onPressed: canDraw ? _save : null),
-          IconButton(icon: const Icon(Icons.ios_share), onPressed: canDraw ? _share : null),
         ],
       ),
       body: Column(
@@ -428,7 +355,7 @@ class _HomeState extends State<Home> {
                                   fit: StackFit.expand,
                                   children: [
                                     RawImage(image: _colorImg),   // couleurs
-                                    RawImage(image: _lineArtImg), // traits transparents
+                                    RawImage(image: _lineArtImg), // traits
                                   ],
                                 ),
                               ),
@@ -472,7 +399,7 @@ class _HomeState extends State<Home> {
               _toolButton(Icons.brush, 'Pinceau', Tool.brush),
               _toolButton(Icons.auto_fix_high, 'Gomme', Tool.eraser),
               _toolButton(Icons.colorize, 'Pipette', Tool.pipette),
-              _toolButton(Icons.back_hand, 'Pan', Tool.pan),
+              _toolButton(Icons.back_hand, 'Main', Tool.pan),
               const SizedBox(width: 8),
               _palette(),
             ],
@@ -543,7 +470,7 @@ class _HomeState extends State<Home> {
           border: Border.all(
             color: selected
                 ? Theme.of(context).colorScheme.primary
-                : Colors.black12,
+                : Colors.black26,
           ),
         ),
         child: Row(children: [Icon(icon, size: 18), const SizedBox(width: 6), Text(label)]),
@@ -552,11 +479,9 @@ class _HomeState extends State<Home> {
   }
 }
 
-//
-// ----------------- Painter Line-Art (traits noirs) -----------------
-// - transparentBackground = true : fond transparent (affichage)
-// - transparentBackground = false : fond blanc (analyse flood-fill)
-//
+/// --------- Peintre du line-art (traits) ---------
+/// transparentBackground=true : fond transparent (affichage)
+/// transparentBackground=false : fond blanc (pour le flood-fill)
 class LineArtMandalaPainter {
   final int seed;
   final int symmetry;
@@ -603,7 +528,7 @@ class LineArtMandalaPainter {
     final ringR = List<double>.generate(rings + 1, (i) => R * i / rings);
     final wedge = 2 * pi / symmetry;
 
-    // Cœur rosette
+    // Rosace centrale
     {
       final rIn = ringR[1] * (0.55 + 0.2 * rnd.nextDouble());
       final rOut = ringR[2] * (0.55 + 0.2 * rnd.nextDouble());
@@ -631,18 +556,18 @@ class LineArtMandalaPainter {
       canvas.drawPath(base, pen(stroke));
     }
 
-    // Anneaux
+    // Anneaux concentriques
     for (int i = 2; i < rings; i++) {
       final ri = ringR[i] * (0.98 - 0.04 * rnd.nextDouble());
       final ro = ringR[i + 1] * (0.98 - 0.04 * rnd.nextDouble());
       final base = Path();
-      final motif = rnd.nextInt(3);         // 0 pétales, 1 écailles, 2 dentelle
+      final motif = rnd.nextInt(3); // 0 pétales, 1 écailles, 2 dentelle
       final segments = max(6, (symmetry * (0.8 + density)).round());
 
       for (int s = 0; s < segments; s++) {
         final a = s * (2 * pi / segments);
         switch (motif) {
-          case 0:
+          case 0: // pétales
             final a1 = a - wedge * 0.35;
             final a2 = a + wedge * 0.35;
             final p1 = center + Offset.fromDirection(a1, ri);
@@ -661,24 +586,29 @@ class LineArtMandalaPainter {
             );
             base.close();
             break;
-          case 1:
+
+          case 1: // écailles
             final steps = 3 + rnd.nextInt(3);
             for (int t = 0; t < steps; t++) {
-              final rr = lerpDouble(ri, ro, t / (steps - 1))!;
-              base.addArc(Rect.fromCircle(center: center, radius: rr),
-                  a - wedge * 0.40, wedge * 0.80);
+              final rr = ui.lerpDouble(ri, ro, t / (steps - 1))!;
+              base.addArc(
+                Rect.fromCircle(center: center, radius: rr),
+                a - wedge * 0.40,
+                wedge * 0.80,
+              );
             }
             break;
-          case 2:
+
+          case 2: // dentelle (arcs internes)
             final a1b = a - wedge * 0.25;
             final a2b = a + wedge * 0.25;
             final q = 2 + rnd.nextInt(3);
             for (int k = 0; k < q; k++) {
               final t = (k + 1) / (q + 1);
-              final rmid = lerpDouble(ri, ro, 0.55)!;
-              final p1 = center + Offset.fromDirection(lerpDouble(a1b, a, t)!, ri);
+              final rmid = ui.lerpDouble(ri, ro, 0.55)!;
+              final p1 = center + Offset.fromDirection(ui.lerpDouble(a1b, a, t)!, ri);
               final p2 = center + Offset.fromDirection(a, rmid);
-              final p3 = center + Offset.fromDirection(lerpDouble(a, a2b, t)!, ri);
+              final p3 = center + Offset.fromDirection(ui.lerpDouble(a, a2b, t)!, ri);
               base.moveTo(p1.dx, p1.dy);
               base.quadraticBezierTo(
                 center.dx + cos(a) * (rmid * 0.8),
@@ -695,21 +625,21 @@ class LineArtMandalaPainter {
         }
       }
 
-      // Répéter + miroir
-      void repeat(Path base) {
+      // Répéter autour + miroir vertical (symétrie radiale)
+      void repeat(Path basePath) {
         for (int k = 0; k < symmetry; k++) {
           final ang = k * wedge;
           final m = Matrix4.identity()
             ..translate(center.dx, center.dy)
             ..rotateZ(ang)
             ..translate(-center.dx, -center.dy);
-          canvas.drawPath(base.transform(m.storage), pen(stroke));
+          canvas.drawPath(basePath.transform(m.storage), pen(stroke));
           final m2 = Matrix4.identity()
             ..translate(center.dx, center.dy)
             ..rotateZ(ang)
             ..scale(1, -1, 1)
             ..translate(-center.dx, -center.dy);
-          canvas.drawPath(base.transform(m2.storage), pen(stroke));
+          canvas.drawPath(basePath.transform(m2.storage), pen(stroke));
         }
       }
 
@@ -717,6 +647,7 @@ class LineArtMandalaPainter {
       canvas.drawCircle(center, ro, pen(stroke * 0.8));
     }
 
+    // Petits détails aléatoires
     if (addDoodles) {
       final p = pen(max(0.8, stroke * 0.7));
       final dots = (120 * density).round();
