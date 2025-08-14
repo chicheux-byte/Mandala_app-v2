@@ -1,12 +1,27 @@
-import 'dart:async';
-
+// Fullscreen + mandala painter + tools, mobile friendly
+import 'dart:async';                 // <-- pour Completer()
 import 'dart:math';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
 
-void main() => runApp(const App());
+  // Plein écran immersif (les barres réapparaissent au swipe puis se cachent)
+  await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+  // Thème overlays clair pour fond clair
+  SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
+    statusBarColor: Colors.transparent,
+    statusBarIconBrightness: Brightness.dark,
+    systemNavigationBarColor: Colors.transparent,
+    systemNavigationBarIconBrightness: Brightness.dark,
+  ));
+
+  runApp(const App());
+}
 
 class App extends StatelessWidget {
   const App({super.key});
@@ -17,7 +32,7 @@ class App extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         useMaterial3: true,
-        colorSchemeSeed: const Color(0xFF6750A4),
+        colorSchemeSeed: const Color(0xFF7C4DFF),
         brightness: Brightness.light,
       ),
       home: const Home(),
@@ -25,7 +40,7 @@ class App extends StatelessWidget {
   }
 }
 
-/// Outils disponibles
+/// Outils
 enum Tool { bucket, brush, eraser, pipette, pan }
 
 /// Styles de génération
@@ -41,13 +56,13 @@ class _HomeState extends State<Home> {
   // Canvas offscreen
   static const int W = 1024, H = 1024;
 
-  // Images de travail
-  ui.Image? _lineArtImg;        // traits noirs en TRANSPARENT
-  Uint8List? _maskRgba;         // line-art sur fond blanc (pour barrières)
-  ui.Image? _colorImg;          // couche couleur (dessous)
+  // Images/canaux
+  ui.Image? _lineArtImg;      // traits transparents (affichage)
+  Uint8List? _maskRgba;       // traits sur fond blanc (barrières)
+  ui.Image? _colorImg;        // couche couleur
   Uint8List _colorRgba = Uint8List(W * H * 4);
 
-  // Génération
+  // Paramètres mandala (avec valeurs sûres)
   int seed = DateTime.now().millisecondsSinceEpoch;
   int symmetry = 14;
   int rings = 6;
@@ -61,7 +76,10 @@ class _HomeState extends State<Home> {
   Color paintColor = const Color(0xFF57E1FF);
   double brushSize = 22;
 
+  // Zoom/pan
   final TransformationController _ctrl = TransformationController();
+
+  // State
   bool _busy = false;
   Offset? _lastDrag;
 
@@ -72,48 +90,55 @@ class _HomeState extends State<Home> {
     _regenerate();
   }
 
-  // ============== Génération ==============
-
+  // ----------------- Génération (sécurisée) -----------------
   Future<void> _regenerate() async {
     setState(() => _busy = true);
+    try {
+      // 1) line-art transparent (affichage)
+      final r1 = ui.PictureRecorder();
+      final c1 = Canvas(r1, Rect.fromLTWH(0, 0, W.toDouble(), H.toDouble()));
+      final painter = LineArtMandalaPainter(
+        seed: seed,
+        symmetry: symmetry,
+        rings: rings,
+        stroke: stroke,
+        density: detail,
+        addDoodles: doodles,
+        transparentBackground: true,
+      );
+      painter.paint(c1, Size(W.toDouble(), H.toDouble()));
+      _lineArtImg = await r1.endRecording().toImage(W, H);
 
-    // 1) Line-art TRANSPARENT (affichage)
-    final rec1 = ui.PictureRecorder();
-    final canvas1 = Canvas(rec1, Rect.fromLTWH(0, 0, W.toDouble(), H.toDouble()));
-    final painter = LineArtMandalaPainter(
-      seed: seed,
-      symmetry: symmetry,
-      rings: rings,
-      stroke: stroke,
-      density: detail,
-      addDoodles: doodles,
-      transparentBackground: true,
-    );
-    painter.paint(canvas1, Size(W.toDouble(), H.toDouble())); // <-- pas const
-    _lineArtImg = await rec1.endRecording().toImage(W, H);
+      // 2) line-art sur fond blanc (barrières pour seau)
+      final r2 = ui.PictureRecorder();
+      final c2 = Canvas(r2, Rect.fromLTWH(0, 0, W.toDouble(), H.toDouble()));
+      final painterMask = LineArtMandalaPainter(
+        seed: seed,
+        symmetry: symmetry,
+        rings: rings,
+        stroke: stroke,
+        density: detail,
+        addDoodles: doodles,
+        transparentBackground: false,
+      );
+      painterMask.paint(c2, Size(W.toDouble(), H.toDouble()));
+      final mask = await r2.endRecording().toImage(W, H);
+      final bd = await mask.toByteData(format: ui.ImageByteFormat.rawRgba);
+      _maskRgba = bd!.buffer.asUint8List();
 
-    // 2) Line-art sur FOND BLANC (barrières pour flood-fill)
-    final rec2 = ui.PictureRecorder();
-    final canvas2 = Canvas(rec2, Rect.fromLTWH(0, 0, W.toDouble(), H.toDouble()));
-    final painterMask = LineArtMandalaPainter(
-      seed: seed,
-      symmetry: symmetry,
-      rings: rings,
-      stroke: stroke,
-      density: detail,
-      addDoodles: doodles,
-      transparentBackground: false, // fond blanc obligatoire
-    );
-    painterMask.paint(canvas2, Size(W.toDouble(), H.toDouble()));
-    final maskImage = await rec2.endRecording().toImage(W, H);
-    final bd = await maskImage.toByteData(format: ui.ImageByteFormat.rawRgba);
-    _maskRgba = bd!.buffer.asUint8List();
-
-    // 3) Couche couleur = vide (transparent)
-    _colorRgba = Uint8List(W * H * 4);
-    _colorImg = await _rgbaToImage(_colorRgba, W, H);
-
-    setState(() => _busy = false);
+      // 3) couche couleur vide
+      _colorRgba = Uint8List(W * H * 4);
+      _colorImg = await _rgbaToImage(_colorRgba, W, H);
+    } catch (e, st) {
+      debugPrint('❌ Generation failed: $e\n$st');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Erreur génération: $e')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
   }
 
   Future<ui.Image> _rgbaToImage(Uint8List rgba, int w, int h) async {
@@ -122,8 +147,7 @@ class _HomeState extends State<Home> {
     return c.future;
   }
 
-  // ============== Outils ==============
-
+  // ----------------- Outils -----------------
   Offset _toImageSpace(Offset p, Size box) {
     final s = min(box.width, box.height);
     final scale = W / s;
@@ -170,7 +194,7 @@ class _HomeState extends State<Home> {
       final r = _maskRgba![pxIndex + 0];
       final g = _maskRgba![pxIndex + 1];
       final b = _maskRgba![pxIndex + 2];
-      return (r + g + b) < 150; // traits noirs/gris = barrière
+      return (r + g + b) < 150; // noir/gris = barrière
     }
 
     final start = (y0 * W + x0) * 4;
@@ -243,8 +267,7 @@ class _HomeState extends State<Home> {
     });
   }
 
-  // ============== Styles ==============
-
+  // ----------------- Styles -----------------
   void _applyPreset(StylePreset preset, {bool regenerate = true}) {
     setState(() {
       style = preset;
@@ -275,22 +298,26 @@ class _HomeState extends State<Home> {
     if (regenerate) _regenerate();
   }
 
-  // ============== UI ==============
-
+  // ----------------- UI -----------------
   @override
   Widget build(BuildContext context) {
     final canDraw = _lineArtImg != null && _colorImg != null;
+    final padding = MediaQuery.of(context).viewPadding; // SafeArea dynamique
 
     return Scaffold(
+      extendBody: true,
+      extendBodyBehindAppBar: false,
       appBar: AppBar(
-        title: const Text('Mandala à colorier'),
+        title: const Text('Mandala'),
+        elevation: 0,
+        toolbarHeight: 56,
         actions: [
           _presetChip('Simple', StylePreset.simple),
           _presetChip('Détaillé', StylePreset.detailed),
           _presetChip('Ultra', StylePreset.ultra),
           IconButton(
-            icon: const Icon(Icons.casino),
             tooltip: 'Nouveau tirage',
+            icon: const Icon(Icons.casino),
             onPressed: () {
               setState(() => seed = Random().nextInt(1 << 31));
               _regenerate();
@@ -298,80 +325,89 @@ class _HomeState extends State<Home> {
           ),
         ],
       ),
-      body: Column(
-        children: [
-          Expanded(
-            child: Center(
-              child: AspectRatio(
-                aspectRatio: 1,
+      body: SafeArea(
+        bottom: false, // on gère nous-mêmes l’espace bas
+        child: Column(
+          children: [
+            // Zone de dessin
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 8),
                 child: DecoratedBox(
                   decoration: BoxDecoration(
                     color: Colors.white,
-                    border: Border.all(color: Colors.black12),
                     borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: Colors.black12),
                     boxShadow: const [BoxShadow(blurRadius: 12, color: Colors.black12)],
                   ),
-                  child: _busy || !canDraw
-                      ? const Center(child: CircularProgressIndicator())
-                      : LayoutBuilder(
-                          builder: (context, c) {
-                            final box = Size(c.maxWidth, c.maxHeight);
-                            return InteractiveViewer(
-                              transformationController: _ctrl,
-                              minScale: 0.6,
-                              maxScale: 8.0,
-                              panEnabled: tool == Tool.pan,
-                              scaleEnabled: true,
-                              child: GestureDetector(
-                                onTapDown: (d) {
-                                  final p = _toImageSpace(d.localPosition, box);
-                                  if (tool == Tool.bucket) {
-                                    _bucketFill(p);
-                                    _refreshColorImage();
-                                  } else if (tool == Tool.pipette) {
-                                    _pipette(p);
-                                  }
-                                },
-                                onPanStart: (d) {
-                                  final p = _toImageSpace(d.localPosition, box);
-                                  if (tool == Tool.brush || tool == Tool.eraser) {
-                                    _paintAt(p, erase: tool == Tool.eraser);
-                                    _lastDrag = p;
-                                    _refreshColorImage();
-                                  }
-                                },
-                                onPanUpdate: (d) {
-                                  final p = _toImageSpace(d.localPosition, box);
-                                  if (tool == Tool.brush || tool == Tool.eraser) {
-                                    final steps = ((_lastDrag ?? p) - p).distance ~/ 1 + 1;
-                                    for (int i = 0; i <= steps; i++) {
-                                      final q = Offset.lerp(_lastDrag ?? p, p, i / max(1, steps))!;
-                                      _paintAt(q, erase: tool == Tool.eraser);
+                  child: AspectRatio(
+                    aspectRatio: 1,
+                    child: _busy || !canDraw
+                        ? const Center(child: CircularProgressIndicator())
+                        : LayoutBuilder(
+                            builder: (context, c) {
+                              final box = Size(c.maxWidth, c.maxHeight);
+                              return InteractiveViewer(
+                                transformationController: _ctrl,
+                                minScale: 0.6,
+                                maxScale: 8.0,
+                                panEnabled: tool == Tool.pan,
+                                scaleEnabled: true,
+                                child: GestureDetector(
+                                  onTapDown: (d) {
+                                    final p = _toImageSpace(d.localPosition, box);
+                                    if (tool == Tool.bucket) {
+                                      _bucketFill(p);
+                                      _refreshColorImage();
+                                    } else if (tool == Tool.pipette) {
+                                      _pipette(p);
                                     }
-                                    _lastDrag = p;
-                                    _refreshColorImage();
-                                  }
-                                },
-                                onPanEnd: (_) => _lastDrag = null,
-                                child: Stack(
-                                  fit: StackFit.expand,
-                                  children: [
-                                    RawImage(image: _colorImg),   // couleurs
-                                    RawImage(image: _lineArtImg), // traits
-                                  ],
+                                  },
+                                  onPanStart: (d) {
+                                    final p = _toImageSpace(d.localPosition, box);
+                                    if (tool == Tool.brush || tool == Tool.eraser) {
+                                      _paintAt(p, erase: tool == Tool.eraser);
+                                      _lastDrag = p;
+                                      _refreshColorImage();
+                                    }
+                                  },
+                                  onPanUpdate: (d) {
+                                    final p = _toImageSpace(d.localPosition, box);
+                                    if (tool == Tool.brush || tool == Tool.eraser) {
+                                      final steps = ((_lastDrag ?? p) - p).distance ~/ 1 + 1;
+                                      for (int i = 0; i <= steps; i++) {
+                                        final q = Offset.lerp(_lastDrag ?? p, p, i / max(1, steps))!;
+                                        _paintAt(q, erase: tool == Tool.eraser);
+                                      }
+                                      _lastDrag = p;
+                                      _refreshColorImage();
+                                    }
+                                  },
+                                  onPanEnd: (_) => _lastDrag = null,
+                                  child: Stack(
+                                    fit: StackFit.expand,
+                                    children: [
+                                      RawImage(image: _colorImg),   // couleurs
+                                      RawImage(image: _lineArtImg), // traits
+                                    ],
+                                  ),
                                 ),
-                              ),
-                            );
-                          },
-                        ),
+                              );
+                            },
+                          ),
+                  ),
                 ),
               ),
             ),
-          ),
-          const SizedBox(height: 8),
-          _toolbar(context),
-          const SizedBox(height: 10),
-        ],
+
+            // Outils / palette
+            const SizedBox(height: 8),
+            _toolbar(context),
+
+            // Espace pour ne pas chevaucher la barre système (gestes Android)
+            SizedBox(height: max(8.0, padding.bottom)),
+          ],
+        ),
       ),
     );
   }
@@ -396,6 +432,7 @@ class _HomeState extends State<Home> {
           Wrap(
             spacing: 8,
             runSpacing: 8,
+            alignment: WrapAlignment.center,
             children: [
               _toolButton(Icons.format_color_fill, 'Pot', Tool.bucket),
               _toolButton(Icons.brush, 'Pinceau', Tool.brush),
@@ -437,16 +474,17 @@ class _HomeState extends State<Home> {
     ];
     return Wrap(
       spacing: 6,
+      runSpacing: 6,
       children: [
         for (final c in colors)
           GestureDetector(
             onTap: () => setState(() => paintColor = c),
             child: Container(
-              width: 24, height: 24,
+              width: 26, height: 26,
               decoration: BoxDecoration(
                 color: c,
                 shape: BoxShape.circle,
-                border: Border.all(color: Colors.black12),
+                border: Border.all(color: Colors.black26),
                 boxShadow: [
                   if (paintColor.value == c.value) const BoxShadow(blurRadius: 6),
                 ],
@@ -481,9 +519,7 @@ class _HomeState extends State<Home> {
   }
 }
 
-/// --------- Peintre du line-art (traits) ---------
-/// transparentBackground=true : fond transparent (affichage)
-/// transparentBackground=false : fond blanc (pour le flood-fill)
+// ----------------- Peintre du line-art -----------------
 class LineArtMandalaPainter {
   final int seed;
   final int symmetry;
@@ -506,12 +542,19 @@ class LineArtMandalaPainter {
   final _black = const Color(0xFF000000);
 
   void paint(Canvas canvas, Size size) {
+    // Fond blanc si demandé
     if (!transparentBackground) {
       canvas.drawRect(
         Rect.fromLTWH(0, 0, size.width, size.height),
         Paint()..color = Colors.white,
       );
     }
+
+    // Garde-fous
+    final _rings = max(3, rings);
+    final _sym = max(6, symmetry);
+    final _stroke = stroke.clamp(0.6, 6.0);
+    final _dens = density.clamp(0.3, 1.2);
 
     final rnd = Random(seed);
     final center = size.center(Offset.zero);
@@ -525,16 +568,17 @@ class LineArtMandalaPainter {
       ..strokeJoin = StrokeJoin.round
       ..isAntiAlias = true;
 
-    canvas.drawCircle(center, R, pen(stroke * 0.85));
+    // Toujours au moins un cercle extérieur visible
+    canvas.drawCircle(center, R, pen(_stroke * 0.85));
 
-    final ringR = List<double>.generate(rings + 1, (i) => R * i / rings);
-    final wedge = 2 * pi / symmetry;
+    final ringR = List<double>.generate(_rings + 1, (i) => R * i / _rings);
+    final wedge = 2 * pi / _sym;
 
     // Rosace centrale
     {
       final rIn = ringR[1] * (0.55 + 0.2 * rnd.nextDouble());
-      final rOut = ringR[2] * (0.55 + 0.2 * rnd.nextDouble());
-      final petals = max(6, (symmetry / 2).round());
+      final rOut = ringR[min(2, ringR.length - 1)] * (0.55 + 0.2 * rnd.nextDouble());
+      final petals = max(6, (_sym / 2).round());
       final base = Path();
       final alpha = wedge / 2.2;
       for (int i = 0; i < petals; i++) {
@@ -555,16 +599,16 @@ class LineArtMandalaPainter {
         );
         base.close();
       }
-      canvas.drawPath(base, pen(stroke));
+      canvas.drawPath(base, pen(_stroke));
     }
 
-    // Anneaux concentriques
-    for (int i = 2; i < rings; i++) {
+    // Anneaux
+    for (int i = 2; i < _rings; i++) {
       final ri = ringR[i] * (0.98 - 0.04 * rnd.nextDouble());
       final ro = ringR[i + 1] * (0.98 - 0.04 * rnd.nextDouble());
       final base = Path();
       final motif = rnd.nextInt(3); // 0 pétales, 1 écailles, 2 dentelle
-      final segments = max(6, (symmetry * (0.8 + density)).round());
+      final segments = max(6, (_sym * (0.8 + _dens)).round());
 
       for (int s = 0; s < segments; s++) {
         final a = s * (2 * pi / segments);
@@ -589,7 +633,7 @@ class LineArtMandalaPainter {
             base.close();
             break;
 
-          case 1: // écailles
+          case 1: // écailles concentriques
             final steps = 3 + rnd.nextInt(3);
             for (int t = 0; t < steps; t++) {
               final rr = ui.lerpDouble(ri, ro, t / (steps - 1))!;
@@ -601,7 +645,7 @@ class LineArtMandalaPainter {
             }
             break;
 
-          case 2: // dentelle (arcs internes)
+          case 2: // dentelle
             final a1b = a - wedge * 0.25;
             final a2b = a + wedge * 0.25;
             final q = 2 + rnd.nextInt(3);
@@ -627,35 +671,34 @@ class LineArtMandalaPainter {
         }
       }
 
-      // Répéter autour + miroir vertical (symétrie radiale)
       void repeat(Path basePath) {
-        for (int k = 0; k < symmetry; k++) {
+        for (int k = 0; k < _sym; k++) {
           final ang = k * wedge;
           final m = Matrix4.identity()
             ..translate(center.dx, center.dy)
             ..rotateZ(ang)
             ..translate(-center.dx, -center.dy);
-          canvas.drawPath(basePath.transform(m.storage), pen(stroke));
+          canvas.drawPath(basePath.transform(m.storage), pen(_stroke));
           final m2 = Matrix4.identity()
             ..translate(center.dx, center.dy)
             ..rotateZ(ang)
             ..scale(1, -1, 1)
             ..translate(-center.dx, -center.dy);
-          canvas.drawPath(basePath.transform(m2.storage), pen(stroke));
+          canvas.drawPath(basePath.transform(m2.storage), pen(_stroke));
         }
       }
 
       repeat(base);
-      canvas.drawCircle(center, ro, pen(stroke * 0.8));
+      canvas.drawCircle(center, ro, pen(_stroke * 0.8));
     }
 
-    // Petits détails aléatoires
+    // Détails
     if (addDoodles) {
-      final p = pen(max(0.8, stroke * 0.7));
-      final dots = (120 * density).round();
+      final p = pen(max(0.8, _stroke * 0.7));
+      final dots = (120 * _dens).round();
       for (int i = 0; i < dots; i++) {
-        final rr = R * (0.12 + rnd.nextDouble() * 0.85);
-        final a = rnd.nextDouble() * 2 * pi;
+        final rr = R * (0.12 + Random(seed + i).nextDouble() * 0.85);
+        final a = Random(seed * 13 + i).nextDouble() * 2 * pi;
         canvas.drawCircle(center + Offset.fromDirection(a, rr), p.strokeWidth, p);
       }
     }
