@@ -4,12 +4,13 @@ workflows:
     environment:
       flutter: stable
     scripts:
-      - name: Bootstrap (create android/ if missing)
-        script: |
-          if [ ! -d "android" ]; then
-            flutter create .
-          fi
-          flutter pub get
+  - name: Bootstrap (create android/ if missing)
+    script: |
+      if [ ! -d "android" ]; then
+        flutter create .
+      fi
+      flutter clean
+      flutter pub get
       - name: Build debug APK
         script: flutter build apk --debug
     artifacts:
