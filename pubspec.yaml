@@ -1,0 +1,23 @@
+name: mandala_app
+description: Application Flutter de génération de mandalas
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: ">=2.17.0 <3.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.2
+  path_provider: ^2.0.11
+  share_plus: ^6.3.0
+  flutter_colorpicker: ^1.0.3
+  gallery_saver: ^2.3.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+flutter:
+  uses-material-design: true
