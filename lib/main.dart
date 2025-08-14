@@ -1,4 +1,4 @@
-// Mandala painter full app (mobile fullscreen, tools, UnimplementedError fix)
+// Mandala painter full app (mobile fullscreen, tools, UnimplementedError-proof image IO)
 
 import 'dart:async';
 import 'dart:math';
@@ -55,8 +55,8 @@ class _HomeState extends State<Home> {
 
   // Images
   ui.Image? _lineArtImg;      // traits transparents (affichage)
-  Uint8List? _maskRgba;       // traits sur fond blanc (barrières)
-  ui.Image? _colorImg;        // couche couleur
+  Uint8List? _maskRgba;       // traits sur fond blanc (barrières, RGBA)
+  ui.Image? _colorImg;        // couche couleur affichable
   Uint8List _colorRgba = Uint8List(W * H * 4);
 
   // Paramètres mandala
@@ -86,9 +86,10 @@ class _HomeState extends State<Home> {
     _regenerate();
   }
 
-  // -------- RGBA → Image (compatible Android) ----------
+  // ========= IMAGE UTILS (résistent à UnimplementedError) =========
+
+  // RGBA → ui.Image via ImmutableBuffer + ImageDescriptor + codec
   Future<ui.Image> _rgbaToImage(Uint8List rgba, int w, int h) async {
-    // Fix UnimplementedError: on utilise ImmutableBuffer + ImageDescriptor.raw + codec
     final buffer = await ui.ImmutableBuffer.fromUint8List(rgba);
     final descriptor = ui.ImageDescriptor.raw(
       buffer,
@@ -101,7 +102,36 @@ class _HomeState extends State<Home> {
     return frame.image;
   }
 
-  // ------------------- Génération ----------------------
+  // ui.Image → RGBA (essaie rawStraightRgba → rawRgba → PNG fallback)
+  Future<Uint8List> _imageToRgba(ui.Image img) async {
+    // 1) RAW STRAIGHT RGBA
+    try {
+      final bd = await img.toByteData(format: ui.ImageByteFormat.rawStraightRgba);
+      if (bd != null) return bd.buffer.asUint8List();
+    } catch (_) {}
+    // 2) RAW RGBA
+    try {
+      final bd = await img.toByteData(format: ui.ImageByteFormat.rawRgba);
+      if (bd != null) return bd.buffer.asUint8List();
+    } catch (_) {}
+    // 3) Fallback PNG → re-decode → RAW
+    final png = await img.toByteData(format: ui.ImageByteFormat.png);
+    if (png == null) {
+      throw UnimplementedError('Aucun format RAW supporté (PNG encode failed).');
+    }
+    final codec = await ui.instantiateImageCodec(png.buffer.asUint8List());
+    final frame = await codec.getNextFrame();
+    try {
+      final bd = await frame.image.toByteData(format: ui.ImageByteFormat.rawStraightRgba);
+      if (bd != null) return bd.buffer.asUint8List();
+    } catch (_) {}
+    final bd2 = await frame.image.toByteData(format: ui.ImageByteFormat.rawRgba);
+    if (bd2 != null) return bd2.buffer.asUint8List();
+
+    throw UnimplementedError('Aucun format RAW supporté par ce moteur.');
+  }
+
+  // ==================== Génération ====================
   Future<void> _regenerate() async {
     setState(() => _busy = true);
     try {
@@ -120,7 +150,7 @@ class _HomeState extends State<Home> {
       painter.paint(c1, Size(W.toDouble(), H.toDouble()));
       _lineArtImg = await r1.endRecording().toImage(W, H);
 
-      // 2) line-art sur fond blanc (barrières pour le seau)
+      // 2) line-art sur fond blanc (barrières pour le seau) → RGBA robuste
       final r2 = ui.PictureRecorder();
       final c2 = Canvas(r2, Rect.fromLTWH(0, 0, W.toDouble(), H.toDouble()));
       final painterMask = LineArtMandalaPainter(
@@ -134,8 +164,7 @@ class _HomeState extends State<Home> {
       );
       painterMask.paint(c2, Size(W.toDouble(), H.toDouble()));
       final mask = await r2.endRecording().toImage(W, H);
-      final bd = await mask.toByteData(format: ui.ImageByteFormat.rawRgba);
-      _maskRgba = bd!.buffer.asUint8List();
+      _maskRgba = await _imageToRgba(mask); // <-- patch robuste
 
       // 3) couche couleur (vide) + image affichable
       _colorRgba = Uint8List(W * H * 4);
@@ -152,7 +181,7 @@ class _HomeState extends State<Home> {
     }
   }
 
-  // -------------- Outils dessin & seau -----------------
+  // ============ Outils dessin & seau =============
   Offset _toImageSpace(Offset p, Size box) {
     final s = min(box.width, box.height);
     final scale = W / s;
@@ -272,7 +301,7 @@ class _HomeState extends State<Home> {
     });
   }
 
-  // ---------------- Styles -----------------
+  // ================= Styles =================
   void _applyPreset(StylePreset preset, {bool regenerate = true}) {
     setState(() {
       style = preset;
@@ -303,7 +332,7 @@ class _HomeState extends State<Home> {
     if (regenerate) _regenerate();
   }
 
-  // ---------------- UI -----------------
+  // ================= UI =================
   @override
   Widget build(BuildContext context) {
     final canDraw = _lineArtImg != null && _colorImg != null;
@@ -516,7 +545,7 @@ class _HomeState extends State<Home> {
   }
 }
 
-// ----------------- Peintre du line-art -----------------
+// ================== Peintre du line-art ==================
 class LineArtMandalaPainter {
   final int seed;
   final int symmetry;
@@ -564,7 +593,7 @@ class LineArtMandalaPainter {
       ..strokeJoin = StrokeJoin.round
       ..isAntiAlias = true;
 
-    // Toujours au moins un cercle visible
+    // cercle externe « ancre »
     canvas.drawCircle(center, R, pen(_stroke * 0.85));
 
     final ringR = List<double>.generate(_rings + 1, (i) => R * i / _rings);
