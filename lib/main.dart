@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
@@ -8,440 +9,542 @@ import 'package:flutter/rendering.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 
-void main() {
-  runApp(const MandalaApp());
-}
+void main() => runApp(const App());
 
-class MandalaApp extends StatelessWidget {
-  const MandalaApp({super.key});
-
+class App extends StatelessWidget {
+  const App({super.key});
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Mandala + Dessin',
+      title: 'Mandala Coloriage',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(useMaterial3: true, colorScheme: ColorScheme.fromSeed(seedColor: Colors.teal)),
-      home: const RootTabs(),
+      theme: ThemeData(
+        useMaterial3: true,
+        colorSchemeSeed: const Color(0xFF6750A4),
+        brightness: Brightness.light,
+      ),
+      home: const Home(),
     );
   }
 }
 
-class RootTabs extends StatefulWidget {
-  const RootTabs({super.key});
+/// Outils disponibles
+enum Tool { bucket, brush, eraser, pipette, pan }
+
+/// Styles prédéfinis
+enum StylePreset { simple, detailed, ultra }
+
+class Home extends StatefulWidget {
+  const Home({super.key});
   @override
-  State<RootTabs> createState() => _RootTabsState();
+  State<Home> createState() => _HomeState();
 }
 
-class _RootTabsState extends State<RootTabs> {
-  int idx = 0;
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      body: IndexedStack(
-        index: idx,
-        children: const [
-          MandalaHomePage(),   // Générateur auto
-          FreeDrawPage(),      // Dessin à la main (nouveau)
-        ],
-      ),
-      bottomNavigationBar: NavigationBar(
-        selectedIndex: idx,
-        onDestinationSelected: (v) => setState(() => idx = v),
-        destinations: const [
-          NavigationDestination(icon: Icon(Icons.auto_awesome), label: 'Générer'),
-          NavigationDestination(icon: Icon(Icons.brush), label: 'Dessiner'),
-        ],
-      ),
-    );
-  }
-}
-
-///// ---------- 1) GENERATEUR MANDALA (résumé, comme avant) ----------
-
-class MandalaHomePage extends StatefulWidget {
-  const MandalaHomePage({super.key});
-  @override
-  State<MandalaHomePage> createState() => _MandalaHomePageState();
-}
-
-class _MandalaHomePageState extends State<MandalaHomePage> {
-  final GlobalKey repaintKey = GlobalKey();
+class _HomeState extends State<Home> {
+  // ----- Paramètres de génération -----
   int seed = DateTime.now().millisecondsSinceEpoch;
   int symmetry = 12;
-  int complexity = 8;
-  double stroke = 2.5;
+  int rings = 6;
+  double stroke = 2.0;
+  double detail = 0.8;
+  bool doodles = true;
 
-  void regenerate() => setState(() => seed = Random().nextInt(1 << 31));
+  StylePreset style = StylePreset.detailed;
 
-  Future<void> _sharePng() async {
-    final bytes = await _capturePng(repaintKey);
-    if (bytes == null) return;
-    final dir = await getTemporaryDirectory();
-    final f = File('${dir.path}/mandala_${DateTime.now().millisecondsSinceEpoch}.png');
-    await f.writeAsBytes(bytes, flush: true);
-    await Share.shareXFiles([XFile(f.path)]);
-  }
+  // ----- Rendu offscreen -----
+  static const int W = 1024, H = 1024;
 
-  Future<void> _savePng() async {
-    final bytes = await _capturePng(repaintKey);
-    if (bytes == null) return;
-    final dir = await getApplicationDocumentsDirectory();
-    final outDir = Directory('${dir.path}/mandalas');
-    if (!await outDir.exists()) await outDir.create(recursive: true);
-    final f = File('${outDir.path}/mandala_${DateTime.now().millisecondsSinceEpoch}.png');
-    await f.writeAsBytes(bytes, flush: true);
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Enregistré (mandalas/)')));
-    }
-  }
+  ui.Image? _lineArtImg;        // traits noirs TRANSPARENTS (affichage)
+  Uint8List? _maskRgba;         // line-art sur fond blanc (pour barrières)
+  ui.Image? _colorImg;          // couche couleur (dessous)
+  Uint8List _colorRgba = Uint8List(W * H * 4);
+
+  bool _busy = false;
+
+  // ----- Outils -----
+  Tool tool = Tool.bucket;
+  Color paintColor = const Color(0xFF57E1FF);
+  double brushSize = 20;
+
+  // zoom/pan
+  final TransformationController _ctrl = TransformationController();
 
   @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Mandala Generator'),
-        actions: [
-          IconButton(icon: const Icon(Icons.casino), tooltip: 'Nouveau', onPressed: regenerate),
-          IconButton(icon: const Icon(Icons.download), tooltip: 'Enregistrer', onPressed: _savePng),
-          IconButton(icon: const Icon(Icons.ios_share), tooltip: 'Partager', onPressed: _sharePng),
-        ],
-      ),
-      body: SafeArea(
-        child: Column(
-          children: [
-            Expanded(
-              child: Center(
-                child: AspectRatio(
-                  aspectRatio: 1,
-                  child: RepaintBoundary(
-                    key: repaintKey,
-                    child: Container(
-                      color: Colors.black,
-                      child: CustomPaint(
-                        painter: MandalaPainter(
-                          seed: seed, symmetry: symmetry, complexity: complexity, stroke: stroke),
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              child: Column(children: [
-                Row(children: [
-                  const Text('Symétrie'),
-                  Expanded(child: Slider(min: 4, max: 36, divisions: 32, value: symmetry.toDouble(), onChanged: (v) => setState(() => symmetry = v.round()))),
-                  Text('$symmetry'),
-                ]),
-                Row(children: [
-                  const Text('Complexité'),
-                  Expanded(child: Slider(min: 2, max: 16, divisions: 14, value: complexity.toDouble(), onChanged: (v) => setState(() => complexity = v.round()))),
-                  Text('$complexity'),
-                ]),
-                Row(children: [
-                  const Text('Épaisseur'),
-                  Expanded(child: Slider(min: 0.5, max: 6, value: stroke, onChanged: (v) => setState(() => stroke = v))),
-                  Text(stroke.toStringAsFixed(1)),
-                ]),
-              ]),
-            ),
-          ],
-        ),
-      ),
+  void initState() {
+    super.initState();
+    _applyPreset(style, regenerate: false);
+    _regenerate();
+  }
+
+  // ---------------- Génération du line-art ----------------
+
+  Future<void> _regenerate() async {
+    setState(() => _busy = true);
+
+    // 1) Line-art TRANSPARENT (pour affichage)
+    final picture1 = ui.PictureRecorder();
+    final canvas1 = Canvas(
+      picture1,
+      Rect.fromLTWH(0, 0, W.toDouble(), H.toDouble()),
     );
-  }
-}
+    final painter = LineArtMandalaPainter(
+      seed: seed,
+      symmetry: symmetry,
+      rings: rings,
+      stroke: stroke,
+      density: detail,
+      addDoodles: doodles,
+      transparentBackground: true,
+    );
+    painter.paint(canvas1, const Size(W.toDouble(), H.toDouble()));
+    _lineArtImg = await picture1.endRecording().toImage(W, H);
 
-class MandalaPainter extends CustomPainter {
-  final int seed, symmetry, complexity;
-  final double stroke;
-  MandalaPainter({required this.seed, required this.symmetry, required this.complexity, required this.stroke});
+    // 2) Line-art SUR FOND BLANC (pour flood-fill : détecter les traits)
+    final picture2 = ui.PictureRecorder();
+    final canvas2 = Canvas(
+      picture2,
+      Rect.fromLTWH(0, 0, W.toDouble(), H.toDouble()),
+    );
+    final painterMask = LineArtMandalaPainter(
+      seed: seed,
+      symmetry: symmetry,
+      rings: rings,
+      stroke: stroke,
+      density: detail,
+      addDoodles: doodles,
+      transparentBackground: false, // fond blanc
+    );
+    painterMask.paint(canvas2, const Size(W.toDouble(), H.toDouble()));
+    final maskImage = await picture2.endRecording().toImage(W, H);
+    final bd = await maskImage.toByteData(format: ui.ImageByteFormat.rawRgba);
+    _maskRgba = bd!.buffer.asUint8List();
 
-  @override
-  void paint(Canvas canvas, Size size) {
-    final rng = Random(seed);
-    final center = size.center(Offset.zero);
-    final radius = size.shortestSide * 0.48;
-    final palette = [
-      const Color(0xff00F5D4), const Color(0xff9B5DE5), const Color(0xffF15BB5),
-      const Color(0xffFEE440), const Color(0xff06D6A0), const Color(0xffEF476F), const Color(0xff118AB2),
-    ];
-    final wedge = (2 * pi) / symmetry;
+    // 3) Réinitialiser la couche couleur
+    _colorRgba = Uint8List(W * H * 4); // tout transparent
+    _colorImg = await _rgbaToImage(_colorRgba, W, H);
 
-    final ring = Paint()
-      ..color = Colors.white.withOpacity(0.1)
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = stroke * 1.2;
-    canvas.drawCircle(center, radius, ring);
-
-    for (int l = 0; l < complexity; l++) {
-      final color = palette[l % palette.length];
-      final p = Paint()
-        ..color = color.withOpacity(0.95)
-        ..style = PaintingStyle.stroke
-        ..strokeCap = StrokeCap.round
-        ..strokeJoin = StrokeJoin.round
-        ..strokeWidth = (stroke * (0.7 + l / max(1, complexity))).clamp(0.5, 6);
-
-      final int steps = 24 + rng.nextInt(48);
-      final base = Path();
-      double r = radius * (0.15 + rng.nextDouble() * 0.8);
-      double a = (rng.nextDouble() - 0.5) * wedge * 0.3;
-      base.moveTo(center.dx + cos(a) * r, center.dy + sin(a) * r);
-      for (int i = 0; i < steps; i++) {
-        r = (r + (rng.nextDouble() - 0.5) * radius * 0.06).clamp(radius * 0.05, radius * 0.95);
-        a = (a + (rng.nextDouble() - 0.5) * wedge * 0.15).clamp(-wedge * 0.45, wedge * 0.45);
-        base.lineTo(center.dx + cos(a) * r, center.dy + sin(a) * r);
-      }
-      for (int k = 0; k < symmetry; k++) {
-        final ang = k * wedge;
-        final m = Matrix4.identity()..translate(center.dx, center.dy)..rotateZ(ang)..translate(-center.dx, -center.dy);
-        canvas.drawPath(base.transform(m.storage), p);
-        final m2 = Matrix4.identity()..translate(center.dx, center.dy)..rotateZ(ang)..scale(1, -1, 1)..translate(-center.dx, -center.dy);
-        canvas.drawPath(base.transform(m2.storage), p);
-      }
-    }
+    setState(() => _busy = false);
   }
 
-  @override
-  bool shouldRepaint(covariant MandalaPainter old) =>
-      old.seed != seed || old.symmetry != symmetry || old.complexity != complexity || old.stroke != stroke;
-}
-
-Future<Uint8List?> _capturePng(GlobalKey key) async {
-  final boundary = key.currentContext?.findRenderObject() as RenderRepaintBoundary?;
-  if (boundary == null) return null;
-  final image = await boundary.toImage(pixelRatio: 3);
-  final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
-  return byteData?.buffer.asUint8List();
-}
-
-///// ---------- 2) DESSIN À LA MAIN (4 pinceaux) ----------
-
-enum BrushType { crayon, marqueur, calligraphie, neon }
-
-class Stroke {
-  final List<Offset> points;
-  final Color color;
-  final double size;
-  final BrushType type;
-  Stroke({required this.points, required this.color, required this.size, required this.type});
-}
-
-class FreeDrawPage extends StatefulWidget {
-  const FreeDrawPage({super.key});
-  @override
-  State<FreeDrawPage> createState() => _FreeDrawPageState();
-}
-
-class _FreeDrawPageState extends State<FreeDrawPage> {
-  final GlobalKey repaintKey = GlobalKey();
-  final List<Stroke> strokes = [];
-  final List<Stroke> undone = [];
-  BrushType current = BrushType.crayon;
-  double size = 8;
-  Color color = Colors.cyanAccent;
-  bool dark = true;
-
-  void _start(Offset p) {
-    undone.clear();
-    strokes.add(Stroke(points: [p], color: color, size: size, type: current));
-    setState(() {});
+  Future<ui.Image> _rgbaToImage(Uint8List rgba, int w, int h) async {
+    final c = Completer<ui.Image>();
+    ui.decodeImageFromPixels(rgba, w, h, ui.PixelFormat.rgba8888, c.complete);
+    return c.future;
   }
 
-  void _update(Offset p) {
-    if (strokes.isEmpty) return;
-    strokes.last.points.add(p);
-    setState(() {});
-  }
-
-  void _end() {
-    setState(() {});
-  }
-
-  void _undo() {
-    if (strokes.isNotEmpty) {
-      undone.add(strokes.removeLast());
-      setState(() {});
-    }
-  }
-
-  void _redo() {
-    if (undone.isNotEmpty) {
-      strokes.add(undone.removeLast());
-      setState(() {});
-    }
-  }
+  // ---------------- Export / Partage ----------------
 
   Future<void> _save() async {
-    final bytes = await _capturePng(repaintKey);
-    if (bytes == null) return;
+    if (_lineArtImg == null || _colorImg == null) return;
+    setState(() => _busy = true);
+
+    final rec = ui.PictureRecorder();
+    final c = Canvas(rec);
+    // fond blanc
+    c.drawRect(
+      Rect.fromLTWH(0, 0, W.toDouble(), H.toDouble()),
+      Paint()..color = Colors.white,
+    );
+    c.drawImage(_colorImg!, Offset.zero, Paint());
+    c.drawImage(_lineArtImg!, Offset.zero, Paint());
+    final img = await rec.endRecording().toImage(W, H);
+    final png = await img.toByteData(format: ui.ImageByteFormat.png);
+
     final dir = await getApplicationDocumentsDirectory();
-    final outDir = Directory('${dir.path}/drawings');
-    if (!await outDir.exists()) await outDir.create(recursive: true);
-    final f = File('${outDir.path}/drawing_${DateTime.now().millisecondsSinceEpoch}.png');
-    await f.writeAsBytes(bytes, flush: true);
+    final out = Directory('${dir.path}/mandalas_coloriage');
+    if (!await out.exists()) await out.create(recursive: true);
+    final file = File('${out.path}/mandala_${DateTime.now().millisecondsSinceEpoch}.png');
+    await file.writeAsBytes(png!.buffer.asUint8List(), flush: true);
+
+    setState(() => _busy = false);
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Enregistré (drawings/)')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('Enregistré : ${file.path.split('/').last}')));
     }
   }
 
   Future<void> _share() async {
-    final bytes = await _capturePng(repaintKey);
-    if (bytes == null) return;
+    if (_lineArtImg == null || _colorImg == null) return;
+    setState(() => _busy = true);
+
+    final rec = ui.PictureRecorder();
+    final c = Canvas(rec);
+    c.drawRect(
+      Rect.fromLTWH(0, 0, W.toDouble(), H.toDouble()),
+      Paint()..color = Colors.white,
+    );
+    c.drawImage(_colorImg!, Offset.zero, Paint());
+    c.drawImage(_lineArtImg!, Offset.zero, Paint());
+    final img = await rec.endRecording().toImage(W, H);
+    final png = await img.toByteData(format: ui.ImageByteFormat.png);
+
     final dir = await getTemporaryDirectory();
-    final f = File('${dir.path}/drawing_${DateTime.now().millisecondsSinceEpoch}.png');
-    await f.writeAsBytes(bytes, flush: true);
-    await Share.shareXFiles([XFile(f.path)], text: 'Mon dessin');
+    final file = File('${dir.path}/mandala_${DateTime.now().millisecondsSinceEpoch}.png');
+    await file.writeAsBytes(png!.buffer.asUint8List(), flush: true);
+
+    setState(() => _busy = false);
+    await Share.shareXFiles([XFile(file.path)], text: 'Mon mandala');
   }
+
+  // ---------------- Outils : pinceau / gomme / pot / pipette ----------------
+
+  // convertit position locale (dans le carré) -> coord. image
+  Offset _toImageSpace(Offset p, Size box) {
+    final s = min(box.width, box.height);
+    final scale = W / s;
+    return Offset(p.dx * scale, p.dy * scale);
+  }
+
+  Future<void> _refreshColorImage() async {
+    _colorImg = await _rgbaToImage(_colorRgba, W, H);
+    setState(() {});
+  }
+
+  void _paintAt(Offset pos, {required bool erase}) {
+    final x = pos.dx.clamp(0, W - 1).toInt();
+    final y = pos.dy.clamp(0, H - 1).toInt();
+    final r = max(1, brushSize ~/ 2);
+    final pr = paintColor;
+    final cr = erase ? 0 : pr.red,
+        cg = erase ? 0 : pr.green,
+        cb = erase ? 0 : pr.blue,
+        ca = erase ? 0 : pr.alpha;
+
+    for (int j = -r; j <= r; j++) {
+      final yy = y + j;
+      if (yy < 0 || yy >= H) continue;
+      for (int i = -r; i <= r; i++) {
+        final xx = x + i;
+        if (xx < 0 || xx >= W) continue;
+        if (i * i + j * j > r * r) continue;
+        final idx = (yy * W + xx) * 4;
+        _colorRgba[idx + 0] = cr;
+        _colorRgba[idx + 1] = cg;
+        _colorRgba[idx + 2] = cb;
+        _colorRgba[idx + 3] = ca;
+      }
+    }
+  }
+
+  void _bucketFill(Offset pos) {
+    if (_maskRgba == null) return;
+    final x0 = pos.dx.clamp(0, W - 1).toInt();
+    final y0 = pos.dy.clamp(0, H - 1).toInt();
+
+    bool isBarrier(int idx) {
+      // sur le mask : fond BLANC, traits NOIRS
+      final r = _maskRgba![idx + 0];
+      final g = _maskRgba![idx + 1];
+      final b = _maskRgba![idx + 2];
+      return (r + g + b) < 150; // noir/gris = barrière
+    }
+
+    final start = (y0 * W + x0) * 4;
+    if (isBarrier(start)) return;
+
+    final cr = paintColor.red,
+        cg = paintColor.green,
+        cb = paintColor.blue,
+        ca = paintColor.alpha;
+
+    final visited = Uint8List(W * H);
+    final qx = <int>[x0], qy = <int>[y0];
+
+    while (qx.isNotEmpty) {
+      final x = qx.removeLast();
+      final y = qy.removeLast();
+      final p = y * W + x;
+      if (visited[p] == 1) continue;
+      visited[p] = 1;
+
+      final li = p * 4;
+      if (isBarrier(li)) continue;
+
+      _colorRgba[li + 0] = cr;
+      _colorRgba[li + 1] = cg;
+      _colorRgba[li + 2] = cb;
+      _colorRgba[li + 3] = ca;
+
+      if (x > 0) {
+        final pp = p - 1;
+        if (visited[pp] == 0 && !isBarrier(pp * 4)) {
+          qx.add(x - 1);
+          qy.add(y);
+        }
+      }
+      if (x < W - 1) {
+        final pp = p + 1;
+        if (visited[pp] == 0 && !isBarrier(pp * 4)) {
+          qx.add(x + 1);
+          qy.add(y);
+        }
+      }
+      if (y > 0) {
+        final pp = p - W;
+        if (visited[pp] == 0 && !isBarrier(pp * 4)) {
+          qx.add(x);
+          qy.add(y - 1);
+        }
+      }
+      if (y < H - 1) {
+        final pp = p + W;
+        if (visited[pp] == 0 && !isBarrier(pp * 4)) {
+          qx.add(x);
+          qy.add(y + 1);
+        }
+      }
+    }
+  }
+
+  void _pipette(Offset pos) {
+    final x = pos.dx.clamp(0, W - 1).toInt();
+    final y = pos.dy.clamp(0, H - 1).toInt();
+    final idx = (y * W + x) * 4;
+    final r = _colorRgba[idx + 0];
+    final g = _colorRgba[idx + 1];
+    final b = _colorRgba[idx + 2];
+    final a = _colorRgba[idx + 3];
+    setState(() {
+      paintColor = a == 0 ? Colors.white : Color.fromARGB(a, r, g, b);
+    });
+  }
+
+  // ---------------- Style presets ----------------
+
+  void _applyPreset(StylePreset preset, {bool regenerate = true}) {
+    setState(() {
+      style = preset;
+      switch (preset) {
+        case StylePreset.simple:
+          symmetry = 10;
+          rings = 5;
+          stroke = 2.2;
+          detail = 0.55;
+          doodles = false;
+          break;
+        case StylePreset.detailed:
+          symmetry = 14;
+          rings = 6;
+          stroke = 2.0;
+          detail = 0.8;
+          doodles = true;
+          break;
+        case StylePreset.ultra:
+          symmetry = 22;
+          rings = 8;
+          stroke = 1.8;
+          detail = 0.95;
+          doodles = true;
+          break;
+      }
+    });
+    if (regenerate) _regenerate();
+  }
+
+  // ---------------- UI ----------------
+
+  Offset? _lastDrag;
 
   @override
   Widget build(BuildContext context) {
-    final bg = dark ? Colors.black : Colors.white;
+    final canDraw = _lineArtImg != null && _colorImg != null;
+
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Dessiner'),
+        title: const Text('Mandala à colorier'),
         actions: [
-          IconButton(onPressed: _undo, tooltip: 'Annuler', icon: const Icon(Icons.undo)),
-          IconButton(onPressed: _redo, tooltip: 'Rétablir', icon: const Icon(Icons.redo)),
-          IconButton(onPressed: _save, tooltip: 'Enregistrer', icon: const Icon(Icons.download)),
-          IconButton(onPressed: _share, tooltip: 'Partager', icon: const Icon(Icons.ios_share)),
+          _presetChip('Simple', StylePreset.simple),
+          _presetChip('Détaillé', StylePreset.detailed),
+          _presetChip('Ultra', StylePreset.ultra),
+          const SizedBox(width: 8),
           IconButton(
-            tooltip: dark ? 'Fond clair' : 'Fond sombre',
-            icon: Icon(dark ? Icons.dark_mode : Icons.light_mode),
-            onPressed: () => setState(() => dark = !dark),
+            icon: const Icon(Icons.casino),
+            tooltip: 'Nouveau',
+            onPressed: () {
+              setState(() => seed = Random().nextInt(1 << 31));
+              _regenerate();
+            },
           ),
+          IconButton(icon: const Icon(Icons.download), onPressed: canDraw ? _save : null),
+          IconButton(icon: const Icon(Icons.ios_share), onPressed: canDraw ? _share : null),
         ],
       ),
       body: Column(
         children: [
-          // Zone de dessin
           Expanded(
             child: Center(
               child: AspectRatio(
                 aspectRatio: 1,
-                child: RepaintBoundary(
-                  key: repaintKey,
-                  child: GestureDetector(
-                    onPanStart: (d) => _start(d.localPosition),
-                    onPanUpdate: (d) => _update(d.localPosition),
-                    onPanEnd: (_) => _end(),
-                    child: Container(
-                      color: bg,
-                      child: CustomPaint(
-                        painter: FreeDrawPainter(strokes: strokes, dark: dark),
-                      ),
-                    ),
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    border: Border.all(color: Colors.black12),
+                    borderRadius: BorderRadius.circular(12),
+                    boxShadow: const [BoxShadow(blurRadius: 12, color: Colors.black12)],
                   ),
+                  child: _busy || !canDraw
+                      ? const Center(child: CircularProgressIndicator())
+                      : LayoutBuilder(
+                          builder: (context, c) {
+                            final box = Size(c.maxWidth, c.maxHeight);
+                            return InteractiveViewer(
+                              transformationController: _ctrl,
+                              minScale: 0.6,
+                              maxScale: 8.0,
+                              panEnabled: tool == Tool.pan,
+                              scaleEnabled: true,
+                              child: GestureDetector(
+                                onTapDown: (d) {
+                                  final p = _toImageSpace(d.localPosition, box);
+                                  if (tool == Tool.bucket) {
+                                    _bucketFill(p);
+                                    _refreshColorImage();
+                                  } else if (tool == Tool.pipette) {
+                                    _pipette(p);
+                                  }
+                                },
+                                onPanStart: (d) {
+                                  final p = _toImageSpace(d.localPosition, box);
+                                  if (tool == Tool.brush || tool == Tool.eraser) {
+                                    _paintAt(p, erase: tool == Tool.eraser);
+                                    _lastDrag = p;
+                                    _refreshColorImage();
+                                  }
+                                },
+                                onPanUpdate: (d) {
+                                  final p = _toImageSpace(d.localPosition, box);
+                                  if (tool == Tool.brush || tool == Tool.eraser) {
+                                    final steps = ((_lastDrag ?? p) - p).distance ~/ 1 + 1;
+                                    for (int i = 0; i <= steps; i++) {
+                                      final q = Offset.lerp(_lastDrag ?? p, p, i / max(1, steps))!;
+                                      _paintAt(q, erase: tool == Tool.eraser);
+                                    }
+                                    _lastDrag = p;
+                                    _refreshColorImage();
+                                  }
+                                },
+                                onPanEnd: (_) => _lastDrag = null,
+                                child: Stack(
+                                  fit: StackFit.expand,
+                                  children: [
+                                    RawImage(image: _colorImg),   // couleurs
+                                    RawImage(image: _lineArtImg), // traits transparents
+                                  ],
+                                ),
+                              ),
+                            );
+                          },
+                        ),
                 ),
               ),
             ),
           ),
-          // Outils
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 6, 12, 12),
-            child: Column(
-              children: [
-                // Choix pinceaux (4)
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    _BrushButton(
-                      icon: Icons.edit,
-                      label: 'Crayon',
-                      selected: current == BrushType.crayon,
-                      onTap: () => setState(() => current = BrushType.crayon),
-                    ),
-                    _BrushButton(
-                      icon: Icons.border_color,
-                      label: 'Marqueur',
-                      selected: current == BrushType.marqueur,
-                      onTap: () => setState(() => current = BrushType.marqueur),
-                    ),
-                    _BrushButton(
-                      icon: Icons.title, // pen inclinée ~ calligraphie
-                      label: 'Calli',
-                      selected: current == BrushType.calligraphie,
-                      onTap: () => setState(() => current = BrushType.calligraphie),
-                    ),
-                    _BrushButton(
-                      icon: Icons.blur_on,
-                      label: 'Néon',
-                      selected: current == BrushType.neon,
-                      onTap: () => setState(() => current = BrushType.neon),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 8),
-                // Taille
-                Row(children: [
-                  const Text('Taille'),
-                  Expanded(child: Slider(min: 2, max: 40, value: size, onChanged: (v) => setState(() => size = v))),
-                  Text(size.toStringAsFixed(0)),
-                ]),
-                // Couleurs rapides (pas de dépendance)
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: [
-                    for (final c in [
-                      Colors.white, Colors.black, Colors.redAccent, Colors.orangeAccent, Colors.amberAccent,
-                      Colors.limeAccent, Colors.lightGreenAccent, Colors.cyanAccent, Colors.lightBlueAccent,
-                      Colors.purpleAccent, Colors.pinkAccent,
-                    ])
-                      GestureDetector(
-                        onTap: () => setState(() => color = c),
-                        child: Container(
-                          width: 28, height: 28,
-                          decoration: BoxDecoration(
-                            color: c,
-                            shape: BoxShape.circle,
-                            border: Border.all(color: Colors.black12, width: 1),
-                            boxShadow: [if (color == c) const BoxShadow(blurRadius: 6)],
-                          ),
-                        ),
-                      ),
-                  ],
-                ),
-                const SizedBox(height: 6),
-                // Effacer tout
-                Row(
-                  children: [
-                    const Spacer(),
-                    TextButton.icon(
-                      onPressed: () => setState(() { strokes.clear(); undone.clear(); }),
-                      icon: const Icon(Icons.delete_outline),
-                      label: const Text('Effacer tout'),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
+          const SizedBox(height: 8),
+          _toolbar(context),
+          const SizedBox(height: 10),
         ],
       ),
     );
   }
-}
 
-class _BrushButton extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final bool selected;
-  final VoidCallback onTap;
-  const _BrushButton({required this.icon, required this.label, required this.selected, required this.onTap, super.key});
-  @override
-  Widget build(BuildContext context) {
+  Widget _presetChip(String label, StylePreset preset) {
+    final selected = style == preset;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 2),
+      child: ChoiceChip(
+        label: Text(label),
+        selected: selected,
+        onSelected: (_) => _applyPreset(preset),
+      ),
+    );
+  }
+
+  Widget _toolbar(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 12),
+      child: Column(
+        children: [
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              _toolButton(Icons.format_color_fill, 'Pot', Tool.bucket),
+              _toolButton(Icons.brush, 'Pinceau', Tool.brush),
+              _toolButton(Icons.auto_fix_high, 'Gomme', Tool.eraser),
+              _toolButton(Icons.colorize, 'Pipette', Tool.pipette),
+              _toolButton(Icons.back_hand, 'Pan', Tool.pan),
+              const SizedBox(width: 8),
+              _palette(),
+            ],
+          ),
+          if (tool == Tool.brush || tool == Tool.eraser)
+            Row(
+              children: [
+                const SizedBox(width: 6),
+                const Text('Taille'),
+                Expanded(
+                  child: Slider(
+                    min: 4, max: 64,
+                    value: brushSize,
+                    onChanged: (v) => setState(() => brushSize = v),
+                  ),
+                ),
+                Text(brushSize.toStringAsFixed(0)),
+                const SizedBox(width: 6),
+              ],
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _palette() {
+    final colors = <Color>[
+      Colors.redAccent, Colors.orangeAccent, Colors.amberAccent,
+      Colors.lightGreenAccent, Colors.cyanAccent, Colors.lightBlueAccent,
+      Colors.purpleAccent, Colors.pinkAccent,
+      const Color(0xFF6D4C41), const Color(0xFF37474F),
+      Colors.white, Colors.black,
+    ];
+    return Wrap(
+      spacing: 6,
+      children: [
+        for (final c in colors)
+          GestureDetector(
+            onTap: () => setState(() => paintColor = c),
+            child: Container(
+              width: 24, height: 24,
+              decoration: BoxDecoration(
+                color: c,
+                shape: BoxShape.circle,
+                border: Border.all(color: Colors.black12),
+                boxShadow: [
+                  if (paintColor.value == c.value) const BoxShadow(blurRadius: 6),
+                ],
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _toolButton(IconData icon, String label, Tool t) {
+    final selected = tool == t;
     return InkWell(
-      onTap: onTap,
+      onTap: () => setState(() => tool = t),
       borderRadius: BorderRadius.circular(12),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(12),
-          color: selected ? Theme.of(context).colorScheme.primary.withOpacity(0.15) : Colors.transparent,
-          border: Border.all(color: selected ? Theme.of(context).colorScheme.primary : Colors.black12),
+          color: selected
+              ? Theme.of(context).colorScheme.primary.withOpacity(0.15)
+              : Colors.transparent,
+          border: Border.all(
+            color: selected
+                ? Theme.of(context).colorScheme.primary
+                : Colors.black12,
+          ),
         ),
         child: Row(children: [Icon(icon, size: 18), const SizedBox(width: 6), Text(label)]),
       ),
@@ -449,106 +552,179 @@ class _BrushButton extends StatelessWidget {
   }
 }
 
-class FreeDrawPainter extends CustomPainter {
-  final List<Stroke> strokes;
-  final bool dark;
-  FreeDrawPainter({required this.strokes, required this.dark});
+//
+// ----------------- Painter Line-Art (traits noirs) -----------------
+// - transparentBackground = true : fond transparent (affichage)
+// - transparentBackground = false : fond blanc (analyse flood-fill)
+//
+class LineArtMandalaPainter {
+  final int seed;
+  final int symmetry;
+  final int rings;
+  final double stroke;
+  final double density;
+  final bool addDoodles;
+  final bool transparentBackground;
 
-  @override
+  LineArtMandalaPainter({
+    required this.seed,
+    required this.symmetry,
+    required this.rings,
+    required this.stroke,
+    required this.density,
+    required this.addDoodles,
+    required this.transparentBackground,
+  });
+
+  final _black = const Color(0xFF000000);
+
   void paint(Canvas canvas, Size size) {
-    for (final s in strokes) {
-      switch (s.type) {
-        case BrushType.crayon:
-          _drawLineStroke(canvas, s, opacity: 1.0, cap: StrokeCap.round, widthMul: 1.0);
-          break;
-        case BrushType.marqueur:
-          _drawLineStroke(canvas, s, opacity: 0.35, cap: StrokeCap.round, widthMul: 2.0);
-          break;
-        case BrushType.neon:
-          _drawNeonStroke(canvas, s);
-          break;
-        case BrushType.calligraphie:
-          _drawCalligraphyStroke(canvas, s, angleRad: pi / 6); // ~30°
-          break;
-      }
+    if (!transparentBackground) {
+      canvas.drawRect(
+        Rect.fromLTWH(0, 0, size.width, size.height),
+        Paint()..color = Colors.white,
+      );
     }
-  }
 
-  void _drawLineStroke(Canvas canvas, Stroke s, {double opacity = 1.0, StrokeCap cap = StrokeCap.round, double widthMul = 1.0}) {
-    if (s.points.length < 2) {
-      if (s.points.isNotEmpty) {
-        final p = Paint()
-          ..color = s.color.withOpacity(opacity)
-          ..style = PaintingStyle.fill;
-        canvas.drawCircle(s.points.first, s.size * 0.5 * widthMul, p);
-      }
-      return;
-    }
-    final paint = Paint()
-      ..color = s.color.withOpacity(opacity)
-      ..style = PaintingStyle.stroke
-      ..strokeCap = cap
-      ..strokeJoin = StrokeJoin.round
-      ..strokeWidth = s.size * widthMul;
-    final path = Path()..moveTo(s.points.first.dx, s.points.first.dy);
-    for (int i = 1; i < s.points.length; i++) {
-      path.lineTo(s.points[i].dx, s.points[i].dy);
-    }
-    canvas.drawPath(path, paint);
-  }
+    final rnd = Random(seed);
+    final center = size.center(Offset.zero);
+    final R = size.shortestSide * 0.47;
 
-  void _drawNeonStroke(Canvas canvas, Stroke s) {
-    // halo flou
-    final blurPaint = Paint()
-      ..color = s.color.withOpacity(0.9)
+    Paint pen([double w = 1]) => Paint()
+      ..color = _black
       ..style = PaintingStyle.stroke
+      ..strokeWidth = w
       ..strokeCap = StrokeCap.round
       ..strokeJoin = StrokeJoin.round
-      ..strokeWidth = s.size * 2.2
-      ..maskFilter = const ui.MaskFilter.blur(ui.BlurStyle.normal, 6);
-    final corePaint = Paint()
-      ..color = Colors.white
-      ..style = PaintingStyle.stroke
-      ..strokeCap = StrokeCap.round
-      ..strokeJoin = StrokeJoin.round
-      ..strokeWidth = max(1.0, s.size * 0.7);
+      ..isAntiAlias = true;
 
-    if (s.points.length < 2) {
-      if (s.points.isNotEmpty) {
-        canvas.drawCircle(s.points.first, s.size, blurPaint);
-        canvas.drawCircle(s.points.first, s.size * 0.4, corePaint);
+    canvas.drawCircle(center, R, pen(stroke * 0.85));
+
+    final ringR = List<double>.generate(rings + 1, (i) => R * i / rings);
+    final wedge = 2 * pi / symmetry;
+
+    // Cœur rosette
+    {
+      final rIn = ringR[1] * (0.55 + 0.2 * rnd.nextDouble());
+      final rOut = ringR[2] * (0.55 + 0.2 * rnd.nextDouble());
+      final petals = max(6, (symmetry / 2).round());
+      final base = Path();
+      final alpha = wedge / 2.2;
+      for (int i = 0; i < petals; i++) {
+        final a = i * (2 * pi / petals);
+        final p1 = center + Offset.fromDirection(a - alpha, rIn);
+        final p2 = center + Offset.fromDirection(a, rOut);
+        final p3 = center + Offset.fromDirection(a + alpha, rIn);
+        base.moveTo(p1.dx, p1.dy);
+        base.quadraticBezierTo(
+          center.dx + cos(a - alpha * 0.2) * (rOut * 0.6),
+          center.dy + sin(a - alpha * 0.2) * (rOut * 0.6),
+          p2.dx, p2.dy,
+        );
+        base.quadraticBezierTo(
+          center.dx + cos(a + alpha * 0.2) * (rOut * 0.6),
+          center.dy + sin(a + alpha * 0.2) * (rOut * 0.6),
+          p3.dx, p3.dy,
+        );
+        base.close();
       }
-      return;
+      canvas.drawPath(base, pen(stroke));
     }
-    final path = Path()..moveTo(s.points.first.dx, s.points.first.dy);
-    for (int i = 1; i < s.points.length; i++) {
-      path.lineTo(s.points[i].dx, s.points[i].dy);
+
+    // Anneaux
+    for (int i = 2; i < rings; i++) {
+      final ri = ringR[i] * (0.98 - 0.04 * rnd.nextDouble());
+      final ro = ringR[i + 1] * (0.98 - 0.04 * rnd.nextDouble());
+      final base = Path();
+      final motif = rnd.nextInt(3);         // 0 pétales, 1 écailles, 2 dentelle
+      final segments = max(6, (symmetry * (0.8 + density)).round());
+
+      for (int s = 0; s < segments; s++) {
+        final a = s * (2 * pi / segments);
+        switch (motif) {
+          case 0:
+            final a1 = a - wedge * 0.35;
+            final a2 = a + wedge * 0.35;
+            final p1 = center + Offset.fromDirection(a1, ri);
+            final p2 = center + Offset.fromDirection(a, ro);
+            final p3 = center + Offset.fromDirection(a2, ri);
+            base.moveTo(p1.dx, p1.dy);
+            base.quadraticBezierTo(
+              center.dx + cos(a - wedge * 0.15) * (ro * 0.75),
+              center.dy + sin(a - wedge * 0.15) * (ro * 0.75),
+              p2.dx, p2.dy,
+            );
+            base.quadraticBezierTo(
+              center.dx + cos(a + wedge * 0.15) * (ro * 0.75),
+              center.dy + sin(a + wedge * 0.15) * (ro * 0.75),
+              p3.dx, p3.dy,
+            );
+            base.close();
+            break;
+          case 1:
+            final steps = 3 + rnd.nextInt(3);
+            for (int t = 0; t < steps; t++) {
+              final rr = lerpDouble(ri, ro, t / (steps - 1))!;
+              base.addArc(Rect.fromCircle(center: center, radius: rr),
+                  a - wedge * 0.40, wedge * 0.80);
+            }
+            break;
+          case 2:
+            final a1b = a - wedge * 0.25;
+            final a2b = a + wedge * 0.25;
+            final q = 2 + rnd.nextInt(3);
+            for (int k = 0; k < q; k++) {
+              final t = (k + 1) / (q + 1);
+              final rmid = lerpDouble(ri, ro, 0.55)!;
+              final p1 = center + Offset.fromDirection(lerpDouble(a1b, a, t)!, ri);
+              final p2 = center + Offset.fromDirection(a, rmid);
+              final p3 = center + Offset.fromDirection(lerpDouble(a, a2b, t)!, ri);
+              base.moveTo(p1.dx, p1.dy);
+              base.quadraticBezierTo(
+                center.dx + cos(a) * (rmid * 0.8),
+                center.dy + sin(a) * (rmid * 0.8),
+                p2.dx, p2.dy,
+              );
+              base.quadraticBezierTo(
+                center.dx + cos(a) * (rmid * 0.8),
+                center.dy + sin(a) * (rmid * 0.8),
+                p3.dx, p3.dy,
+              );
+            }
+            break;
+        }
+      }
+
+      // Répéter + miroir
+      void repeat(Path base) {
+        for (int k = 0; k < symmetry; k++) {
+          final ang = k * wedge;
+          final m = Matrix4.identity()
+            ..translate(center.dx, center.dy)
+            ..rotateZ(ang)
+            ..translate(-center.dx, -center.dy);
+          canvas.drawPath(base.transform(m.storage), pen(stroke));
+          final m2 = Matrix4.identity()
+            ..translate(center.dx, center.dy)
+            ..rotateZ(ang)
+            ..scale(1, -1, 1)
+            ..translate(-center.dx, -center.dy);
+          canvas.drawPath(base.transform(m2.storage), pen(stroke));
+        }
+      }
+
+      repeat(base);
+      canvas.drawCircle(center, ro, pen(stroke * 0.8));
     }
-    canvas.drawPath(path, blurPaint);
-    canvas.drawPath(path, corePaint);
+
+    if (addDoodles) {
+      final p = pen(max(0.8, stroke * 0.7));
+      final dots = (120 * density).round();
+      for (int i = 0; i < dots; i++) {
+        final rr = R * (0.12 + rnd.nextDouble() * 0.85);
+        final a = rnd.nextDouble() * 2 * pi;
+        canvas.drawCircle(center + Offset.fromDirection(a, rr), p.strokeWidth, p);
+      }
+    }
   }
-
-  void _drawCalligraphyStroke(Canvas canvas, Stroke s, {required double angleRad}) {
-    // pinceau "tampon" rectangulaire incliné pour effet calligraphie
-    final paint = Paint()
-      ..color = s.color
-      ..style = PaintingStyle.fill;
-
-    final double w = s.size * 1.8;  // longueur du tampon
-    final double h = max(1.0, s.size * 0.5); // épaisseur
-
-    for (final p in s.points) {
-      canvas.save();
-      canvas.translate(p.dx, p.dy);
-      canvas.rotate(angleRad);
-      final rect = Rect.fromCenter(center: Offset.zero, width: w, height: h);
-      final rrect = RRect.fromRectAndRadius(rect, Radius.circular(h * 0.5));
-      canvas.drawRRect(rrect, paint);
-      canvas.restore();
-    }
-  }
-
-  @override
-  bool shouldRepaint(covariant FreeDrawPainter oldDelegate) =>
-      oldDelegate.strokes != strokes || oldDelegate.dark != dark;
 }
